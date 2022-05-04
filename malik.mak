@@ -1,6 +1,6 @@
 CC = gcc-10
-CFLAGS = -std=c99 -g -Wall -Wextra -Werror -O3 -march=native -I. -I/usr/local/Cellar/open-mpi/4.1.0/include 
-LDFLAGS = -L/usr/local/opt/libevent/lib -L/usr/local/Cellar/open-mpi/4.1.0/lib -lmpi
+CFLAGS = -std=c99 -g -Wall -Wextra -Werror -O3 -march=native -I. -I/usr/local/Cellar/open-mpi/4.1.3/include 
+LDFLAGS = -L/usr/local/opt/libevent/lib -L/usr/local/Cellar/open-mpi/4.1.3/lib -lmpi
 
 # Uncomment these for OpenMP
 #CFLAGS += -fopenmp
