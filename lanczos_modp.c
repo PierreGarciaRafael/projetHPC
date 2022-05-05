@@ -44,6 +44,8 @@ char *matrix_filename;
 char *kernel_filename;
 bool right_kernel = false;
 int stop_after = -1;
+int blockingSqrt;
+long mySize;
 
 int n_iterations;      /* variables of the "verbosity engine" */
 double start;
@@ -51,12 +53,27 @@ double last_print;
 bool ETA_flag;
 int expected_iterations;
 
+int MPIsize;
+/******************* thread variables ********************/
+int MPIrank;
 /******************* sparse matrix data structure **************/
 
 struct sparsematrix_t {
         int nrows;        // dimensions
         int ncols;
         long int nnz;     // number of non-zero coefficients
+        int *i;           // row indices (for COO matrices)
+        int *j;           // column indices
+        u32 *x;           // coefficients
+};
+
+struct block_sparsematrix_t {
+        int nrows;        // dimensions
+        int ncols;
+        int nblocksSqrt;  // number of blocks per rows/columns
+        u32 *blockId;     // block end indexes (doesn't contain 0) 
+                          // contains number of non-zero coefficients
+        
         int *i;           // row indices (for COO matrices)
         int *j;           // column indices
         u32 *x;           // coefficients
@@ -129,6 +146,7 @@ void usage(char ** argv)
         printf("--matrix FILENAME           MatrixMarket file containing the spasre matrix\n");
         printf("--prime P                   compute modulo P\n");
         printf("--n N                       blocking factor [default 1]\n");
+        printf("--block-sqrt N               how many blocks per rows/columns\n");
         printf("--output-file FILENAME      store the block of kernel vectors\n");
         printf("--right                     compute right kernel vectors\n");
         printf("--left                      compute left kernel vectors [default]\n");
@@ -141,10 +159,11 @@ void usage(char ** argv)
 
 void process_command_line_options(int argc, char ** argv)
 {
-        struct option longopts[8] = {
+        struct option longopts[9] = {
                 {"matrix", required_argument, NULL, 'm'},
                 {"prime", required_argument, NULL, 'p'},
                 {"n", required_argument, NULL, 'n'},
+                {"block-sqrt", required_argument, NULL, 'b'},
                 {"output-file", required_argument, NULL, 'o'},
                 {"right", no_argument, NULL, 'r'},
                 {"left", no_argument, NULL, 'l'},
@@ -159,6 +178,9 @@ void process_command_line_options(int argc, char ** argv)
                         break;
                 case 'n':
                         n = atoi(optarg);
+                        break;
+                case 'b':
+                        blockingSqrt = atoi(optarg);
                         break;
                 case 'p':
                         prime = atoll(optarg);
@@ -194,7 +216,150 @@ void process_command_line_options(int argc, char ** argv)
         }
 }
 
+
+int matToBlockIndex(int i, int j, int blockWidth, int blockHeight){
+        return blockingSqrt * (i/blockHeight) + (j/blockWidth);
+}
+
+int calcBlockSide(int len, int nBlocks){
+        return len/nBlocks + (len%nBlocks > 0);
+}
+
+void assertBlockMatrix(struct block_sparsematrix_t * M){
+        assert(M->blockId[blockingSqrt*blockingSqrt - 1] == mySize);
+        long u = 0;
+        int bWidth = calcBlockSide(M->ncols,M->nblocksSqrt);
+        int bHeight = calcBlockSide(M->nrows,M->nblocksSqrt);
+        for (int blockId = 0; blockId < blockingSqrt*blockingSqrt; blockId += 1){
+                for (; u < M->blockId[blockId]; u += 1){ // checking each item is in its block.
+                        assert(matToBlockIndex(M->i[u], M->j[u],bWidth,bHeight) == blockId);
+                }
+        }
+        
+}
+
 /****************** sparse matrix operations ******************/
+
+/* Load a matrix from a file in "blocked list of triplets" representation giving
+blocks where it needs to.*/
+void block_sparsematrix_mm_load_MPI(struct block_sparsematrix_t * M, char const * filename)
+{
+        int nrows = 0;
+        int ncols = 0;
+        long nnz = 0;
+        if (MPIrank == 0){
+                printf("Loading matrix from %s\n", filename);
+                fflush(stdout);
+        }
+
+        FILE *f = fopen(filename, "r");
+        if (f == NULL)
+                err(1, "impossible d'ouvrir %s", filename);
+
+        /* read the header, check format */
+        MM_typecode matcode;
+        if (mm_read_banner(f, &matcode) != 0)
+                errx(1, "Could not process Matrix Market banner.\n");
+        if (!mm_is_matrix(matcode) || !mm_is_sparse(matcode))
+                errx(1, "Matrix Market type: [%s] not supported (only sparse matrices are OK)", 
+                        mm_typecode_to_str(matcode));
+        if (!mm_is_general(matcode) || !mm_is_integer(matcode))
+                errx(1, "Matrix type [%s] not supported (only integer general are OK)", 
+                        mm_typecode_to_str(matcode));
+        if (mm_read_mtx_crd_size(f, &nrows, &ncols, &nnz) != 0)
+                errx(1, "Cannot read matrix size");
+        long myStart = MPIrank*(nnz/MPIsize);
+        mySize = (MPIrank == MPIsize-1)? nnz-myStart: nnz/MPIsize;
+        fprintf(stderr, "  - [%s] %d x %d with %ld nz\n", mm_typecode_to_str(matcode), nrows, ncols, mySize);
+        fprintf(stderr, "  - Allocating %.1f MByte, (keeping half of it after load)\n", 1e-6 * (24.0 * mySize));
+
+        int blockWidth = calcBlockSide(ncols,blockingSqrt);
+        int blockHeight = calcBlockSide(nrows,blockingSqrt);
+        assert(blockingSqrt*blockWidth >= ncols);
+        assert(blockingSqrt*blockHeight >= nrows);
+        /* Allocate memory for the matrix */
+        int *Mi = malloc(mySize * sizeof(*Mi));
+        int *Mj = malloc(mySize * sizeof(*Mj));
+        u32 *Mx = malloc(mySize * sizeof(*Mx));
+        u32 *histogramOfBlocks = malloc(blockingSqrt*blockingSqrt*sizeof(*histogramOfBlocks));
+
+        for (int blockId = 0; blockId < blockingSqrt*blockingSqrt; blockId += 1){
+                histogramOfBlocks[blockId] = 0;
+        }
+        if (Mi == NULL || Mj == NULL || Mx == NULL)
+                err(1, "Cannot allocate sparse matrix");
+
+        /* Parse and load actual entries */
+        double start = wtime();
+        // printf("before line skip, r/s %d/%d, domain [%ld,%ld[, nnz = %ld\n",
+        //         MPIrank, MPIsize, myStart, myStart+mySize, nnz);
+        int dump = 0;
+        for (long toSkip = 0; toSkip < myStart; toSkip ++){  
+                fscanf(f, "%d %d %d\n", &dump, &dump, &dump);
+        }
+        for (long u = 0; u < mySize; u++) {
+                int i, j;
+                u32 x;
+                if (3 != fscanf(f, "%d %d %d\n", &i, &j, &x))
+                        errx(1, "parse error entry %ld\n", u);
+                Mi[u] = i - 1;  /* MatrixMarket is 1-based */
+                Mj[u] = j - 1;
+                Mx[u] = x % prime;
+                int Bid = matToBlockIndex(i-1, j-1, blockWidth, blockHeight);
+                histogramOfBlocks[Bid] +=1;
+                
+                // verbosity
+                if (MPIrank == MPIsize -1 && (u & 0xffff) == 0xffff) {
+                        double elapsed = wtime() - start;
+                        double percent = (100. * u) / mySize;
+                        double rate = ftell(f) / 1048576. / elapsed;
+                        printf("\r  - Reading %s: %.1f%% (%.1f MB/s)", matrix_filename, percent, rate);
+                }
+        }
+
+
+
+        /* finalization */
+        fclose(f);
+        fflush( stdout );
+
+        
+
+        int *BMi = malloc(mySize * sizeof(*BMi));
+        int *BMj = malloc(mySize * sizeof(*BMj));
+        u32 *BMx = malloc(mySize * sizeof(*BMx));
+        u32 *Bid = malloc(blockingSqrt*blockingSqrt*sizeof(*Bid));
+        Bid[0] = 0;
+        for (int blockId = 1; blockId < blockingSqrt*blockingSqrt; blockId += 1){
+                Bid[blockId] = Bid[blockId-1] + histogramOfBlocks[blockId-1];
+        }
+        for (long u = 0; u < mySize; u += 1){
+                int bIndex = matToBlockIndex(Mi[u],Mj[u],blockWidth,blockHeight);
+                u32 index = Bid[bIndex];
+                Bid[bIndex] += 1;
+                histogramOfBlocks[bIndex] -= 1;
+                BMi[index] = Mi[u];
+                BMj[index] = Mj[u];
+                BMx[index] = Mx[u];
+                assert(bIndex < blockingSqrt*blockingSqrt);
+                if (bIndex < blockingSqrt*blockingSqrt-1){
+                        assert( Bid[bIndex] <= Bid[bIndex + 1]);
+                }
+        }
+        fflush(stdout);
+        assert(Bid[blockingSqrt*blockingSqrt-1] == mySize);
+        M->nrows = nrows;
+        M->ncols = ncols;
+        M->blockId = Bid;
+        M->nblocksSqrt= blockingSqrt;
+        M->i = BMi;
+        M->j = BMj;
+        M->x = BMx;
+        free(Mi);
+        free(Mj);
+        free(Mx);
+        free(histogramOfBlocks);
+}
 
 /* Load a matrix from a file in "list of triplet" representation */
 void sparsematrix_mm_load(struct sparsematrix_t * M, char const * filename)
@@ -690,11 +855,18 @@ void save_vector_block(char const * filename, int nrows, int ncols, u32 const * 
 int main(int argc, char ** argv)
 {
         MPI_Init(&argc, &argv);
+        MPI_Comm_rank(MPI_COMM_WORLD, &MPIrank);
+        MPI_Comm_size(MPI_COMM_WORLD, &MPIsize);
+
         process_command_line_options(argc, argv);
         
-        struct sparsematrix_t M;
-        sparsematrix_mm_load(&M, matrix_filename);
-
+        
+        struct block_sparsematrix_t M;
+        block_sparsematrix_mm_load_MPI(&M, matrix_filename);
+        printf("finished load, r/s : %d/%d\n", MPIrank, MPIsize);
+        assertBlockMatrix(&M);
+        
+        /*
         u32 *kernel = block_lanczos(&M, n, right_kernel);
  
         if (kernel_filename)
@@ -702,5 +874,8 @@ int main(int argc, char ** argv)
         else
                 printf("Not saving result (no --output given)\n");
         free(kernel);
+        */
+        MPI_Finalize();
         exit(EXIT_SUCCESS);
+        
 }
