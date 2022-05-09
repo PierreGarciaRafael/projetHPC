@@ -58,7 +58,8 @@ int expected_iterations;
 int MPIsize;
 /******************* thread variables ********************/
 int MPIrank;
-MPI_Comm row_comm;
+MPI_Comm line_comm;
+MPI_Comm col_comm;
 
 /******************* sparse matrix data structure **************/
 
@@ -87,7 +88,7 @@ struct unique_block_t {
         int nrows;        // dimensions
         int ncols;
         int nblocksSqrt;  // number of blocks per rows/columns
-        int blockId;      //block coordinate
+        int blockId;      //block coordinate = MPIrank
         int nnz;
         int *i;           // row indices (for COO matrices)
         int *j;           // column indices
@@ -255,6 +256,15 @@ void assertBlockMatrix(struct block_sparsematrix_t * M){
                 }
         }
         
+}
+
+void unique_block_to_sparse_matrix(const struct unique_block_t * B, struct sparsematrix_t *M){
+        M->ncols=B->ncols;
+        M->nrows=B->nrows;
+        M->nnz=B->nnz;
+        M->i=B->i;
+        M->j=B->j;
+        M->x=B->x;
 }
 
 /****************** sparse matrix operations ******************/
@@ -429,7 +439,7 @@ void resizeU32(u32 ** tab, int previousSize, int newSize, bool initZero){
 }
 
 /* Load a matrix from a file in "list of triplet" representation */
-void block_sparsematrix_mm_load(struct unique_block_t * M, char const * filename, int blockIdx)
+void load_uniqueblock_sparsematrix(struct unique_block_t * M, char const * filename, int blockIdx)
 {
         int nrows = 0;
         int ncols = 0;
@@ -485,8 +495,8 @@ void block_sparsematrix_mm_load(struct unique_block_t * M, char const * filename
                                 resizeU32(&BMx, estimatedSize, estimatedSize * 1.2, false);
                                 estimatedSize *= 1.2;
                         }
-                        BMi[nowSize] = i;
-                        BMj[nowSize] = j;
+                        BMi[nowSize] = i-1;
+                        BMj[nowSize] = j-1;
                         BMx[nowSize] = x;
                         nowSize += 1;
                 }
@@ -502,8 +512,6 @@ void block_sparsematrix_mm_load(struct unique_block_t * M, char const * filename
         resizeInt(&BMj, estimatedSize, nowSize, false);
         resizeU32(&BMx, estimatedSize, nowSize, false);
         /* finalization */
-        printf("  - Terminated in %.1fs after %d iterations allowed size = %.1f MByte\n",
-                        wtime() - start, n_iterations, 1e-6 * (12.0 * nowSize));
         fclose(f);
         printf("\n");
         M->nrows = nrows;
@@ -513,6 +521,7 @@ void block_sparsematrix_mm_load(struct unique_block_t * M, char const * filename
         M->j = BMj;
         M->x = BMx;
         M->nnz = nowSize;
+        M->nblocksSqrt = blockingSqrt;
 }
 
 /* Load a matrix from a file in "list of triplet" representation */
@@ -582,7 +591,7 @@ void sparsematrix_mm_load(struct sparsematrix_t * M, char const * filename)
         M->x = Mx;
 }
 
-/* y += M*x or y += transpose(M)*x, according to the transpose flag */ 
+/* y = M*x or y = transpose(M)*x, according to the transpose flag */ 
 void sparse_matrix_vector_product(u32 * y, struct sparsematrix_t const * M, u32 const * x, bool transpose)
 {
         long nnz = M->nnz;
@@ -593,7 +602,7 @@ void sparse_matrix_vector_product(u32 * y, struct sparsematrix_t const * M, u32 
         
         for (long i = 0; i < nrows * n; i++)
                 y[i] = 0;
-                
+        printf("nnz = %ld, n = %ld\n",nnz,n);
         for (long k = 0; k < nnz; k++) {
                 int i = transpose ? Mj[k] : Mi[k];
                 int j = transpose ? Mi[k] : Mj[k];
@@ -606,43 +615,47 @@ void sparse_matrix_vector_product(u32 * y, struct sparsematrix_t const * M, u32 
         }
 }
 
+/* y = M*x or y = transpose(M)*x, according to the transpose flag */ 
 void unique_block_vector_product(u32 *y, struct unique_block_t const * M, u32 const * x, bool transpose)
 {
         long nnz = M->nnz;
-        int nrows = transpose ? M->ncols : M->nrows;
         int const * Mi = M->i;
         int const * Mj = M->j;
         u32 const * Mx = M->x;
-        
-        for (long i = 0; i < nrows * n; i++)
+        int nrows = transpose ? M->ncols : M->nrows;
+        int ncols = transpose ? M->nrows : M->ncols;
+        int startI = (M->blockId/M->nblocksSqrt) * calcBlockSide(nrows, M->nblocksSqrt);
+        int startJ = (M->blockId%M->nblocksSqrt) * calcBlockSide(ncols, M->nblocksSqrt);
+        for (long i = 0; i < calcBlockSide(ncols,M->nblocksSqrt) * n; i++)
                 y[i] = 0;
-        int startOfBlock = blockIndexToStart(M->blockId, calcBlockSide(M->ncols, blockingSqrt),
-         calcBlockSide(M->nrows, blockingSqrt),M->ncols);
+
         for (long k = 0; k < nnz; k++) {
-                int i = transpose ? Mj[k] : Mi[k];
-                int j = transpose ? Mi[k] : Mj[k];
+                int i = transpose ? Mj[k] - startJ : Mi[k] - startI;
+                int j = transpose ? Mi[k] - startI : Mj[k] - startJ;
                 u64 v = Mx[k];
                 for (int l = 0; l < n; l++) {
-                        u64 a = y[i * n + l - startOfBlock];
-                        u64 b = x[j * n + l - startOfBlock];
-                        y[i * n + l - startOfBlock] = (a + v * b) % prime;
+                        u64 a = y[i * n + l];
+                        u64 b = x[j * n + l];
+                        y[i * n + l] = (a + v * b) % prime;
                 }
         }
 }
 
 //computes needed tmp for the next sp_mat_vec_prod, by sharing it with other processes.
-void getRowCalc(u32 *tmp, int size){
-        u32 *toReceive = malloc(size*sizeof(*toReceive));
+void getLineCalc(u32 *tmp, long size){
+        u32 *toReceive = NULL; //to remove warning : "may be uninitialized"
         if (MPIrank%blockingSqrt == 0)
-                toReceive = malloc((blockingSqrt-1) * (size*sizeof(*toReceive)));
+                toReceive = malloc((blockingSqrt) * (size*sizeof(*toReceive)));
         MPI_Gather(tmp, size, MPI_UINT32_T,
-                        toReceive,size, MPI_UINT32_T, 0, row_comm);
-        for (int pid=0; pid < blockingSqrt; pid += 1){
-                for(int i = 0; i < size; i += 1){
-                        tmp[i] += toReceive[pid*size + i]%prime;
+                        toReceive, size, MPI_UINT32_T, 0, line_comm);
+        if (MPIrank%blockingSqrt == 0){
+                for (int pid=1; pid < blockingSqrt; pid += 1){
+                        for(int i = 0; i < size; i += 1){
+                                tmp[i] = (tmp[i] + toReceive[pid*size + i])%prime;
+                        }
                 }
         }
-        MPI_Bcast(tmp, size, MPI_UINT32_T, 0, row_comm);
+        MPI_Bcast(tmp, size, MPI_UINT32_T, 0, line_comm);
         if (MPIrank%blockingSqrt == 0)
                 free(toReceive);
 }
@@ -944,19 +957,51 @@ void final_check(int nrows, int ncols, u32 const * v, u32 const * vtM)
                 printf("  - KO: vt*M != 0\n");                
 }
 
+/**************************** dense vector block IO ************************/
+
+void save_vector_block(char const * filename, int nrows, int ncols, u32 const * v)
+{
+        printf("Saving result in %s\n", filename);
+        FILE * f = fopen(filename, "w");
+        if (f == NULL)
+                err(1, "cannot open %s", filename);
+        fprintf(f, "%%%%MatrixMarket matrix array integer general\n");
+        fprintf(f, "%%block of left-kernel vector computed by lanczos_modp\n");
+        fprintf(f, "%d %d\n", nrows, ncols);
+        for (long j = 0; j < ncols; j++)
+                for (long i = 0; i < nrows; i++)
+                        fprintf(f, "%d\n", v[i*n + j]);
+        fclose(f);
+}
+
+
+void save_sparse_matrix(char const * filename, struct sparsematrix_t const * M)
+{
+        printf("Saving result in %s\n", filename);
+        FILE * f = fopen(filename, "w");
+        if (f == NULL)
+                err(1, "cannot open %s", filename);
+        fprintf(f, "%%%%MatrixMarket spmm integer general\n");
+        fprintf(f, "%d %d %ld\n", M->nrows, M->ncols, M->nnz);
+        for (long u = 0; u < M->nnz; u++)
+                fprintf(f, "%d %d %d\n", M->i[u]+1, M->j[u]+1, M->x[u]);
+        fclose(f);
+}
+
+
 /* Solve x*M == 0 or M*x == 0 (if transpose == True) */
 u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpose)
 {
-        printf("Block Lanczos\n");
+        printf("Block Lanczos parallel r/s %d/%d\n", MPIrank, MPIsize);
 
         /************* preparations **************/
 
         /* allocate blocks of vectors */
         int nrows = transpose ? M->ncols : M->nrows;
         int ncols = transpose ? M->nrows : M->ncols;
-        long block_size = calcBlockSide(blockingSqrt, nrows) * n;
-        long Npad = ((calcBlockSide(blockingSqrt, nrows) + n - 1) / n) * n;
-        long Mpad = ((calcBlockSide(blockingSqrt, ncols) + n - 1) / n) * n;
+        long block_size = calcBlockSide(nrows, blockingSqrt) * n;
+        long Npad = ((calcBlockSide(nrows, blockingSqrt) + n - 1) / n) * n;
+        long Mpad = ((calcBlockSide(ncols, blockingSqrt) + n - 1) / n) * n;
         long block_size_pad = (Npad > Mpad ? Npad : Mpad) * n;
         char human_size[8];
         human_format(human_size, 4 * sizeof(int) * block_size_pad);
@@ -981,9 +1026,24 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                 p[i] = 0;
                 tmp[i] = 0;
         }
-
+        //in order to have the same start as single proc lanczos
+        if (MPIrank%blockingSqrt == 0){
+                for (int i = 0; i < MPIrank/blockingSqrt; i += 1)
+                        for (long i = 0; i < block_size; i++)
+                                v[0] = random64() % prime;
+        }
+        MPI_Bcast(rng_state,4,MPI_UINT64_T,0,line_comm);
+        //we do all of this
         for (long i = 0; i < block_size; i++)
                 v[i] = random64() % prime;
+
+
+        char name[30];
+        sprintf(name,"startVec%d.mtx",MPIrank);
+        printf("saving %s\n", name);
+        save_vector_block(name,
+        block_size/n, n, v);
+        
 
         /************* main loop *************/
         printf("  - Main loop\n");
@@ -993,9 +1053,17 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                 if (stop_after > 0 && n_iterations == stop_after)
                         break;
                 unique_block_vector_product(tmp, M, v, !transpose);
-                getRowCalc(tmp, block_size);
+                getLineCalc(tmp, block_size);
+                if (MPIrank % blockingSqrt == 0){
+                        char name[30];
+                        sprintf(name,"test_parallel%d.mtx",MPIrank/blockingSqrt);
+                        printf("saving %s\n", name);
+                        save_vector_block(name,
+                        calcBlockSide(nrows, blockingSqrt), n, tmp);
+                }
                 unique_block_vector_product(Av, M, tmp, transpose);
-                printf("passed critical\n");
+                getLineCalc(Av, block_size);
+                break;
                 u32 vtAv[n * n];
                 u32 vtAAv[n * n];
                 block_dot_products(vtAv, vtAAv, nrows, Av, v);
@@ -1022,7 +1090,7 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
 
         if (stop_after < 0)
                 final_check(nrows, ncols, v, tmp);
-        printf("  - Terminated in %.1fs after %d iterations\n", wtime() - start, n_iterations);
+        printf("  - Terminated in %.1fs after %d iterations, r/s=%d/%d\n", wtime() - start, n_iterations, MPIrank, MPIsize);
         free(tmp);
         free(Av);
         free(p);
@@ -1069,6 +1137,11 @@ u32 * block_lanczos(struct sparsematrix_t const * M, int n, bool transpose)
 
         for (long i = 0; i < block_size; i++)
                 v[i] = random64() % prime;
+        char name[30];
+        sprintf(name,"startVecSingle.mtx");
+        printf("saving %s\n", name);
+        save_vector_block(name,
+        block_size/n, n, v);
 
         /************* main loop *************/
         printf("  - Main loop\n");
@@ -1079,8 +1152,9 @@ u32 * block_lanczos(struct sparsematrix_t const * M, int n, bool transpose)
                         break;
 
                 sparse_matrix_vector_product(tmp, M, v, !transpose);
+                save_vector_block("test_single.mtx",nrows, n, tmp);
                 sparse_matrix_vector_product(Av, M, tmp, transpose);
-
+                break;
                 u32 vtAv[n * n];
                 u32 vtAAv[n * n];
                 block_dot_products(vtAv, vtAAv, nrows, Av, v);
@@ -1114,21 +1188,23 @@ u32 * block_lanczos(struct sparsematrix_t const * M, int n, bool transpose)
         return v;
 }
 
-/**************************** dense vector block IO ************************/
 
-void save_vector_block(char const * filename, int nrows, int ncols, u32 const * v)
-{
-        printf("Saving result in %s\n", filename);
-        FILE * f = fopen(filename, "w");
-        if (f == NULL)
-                err(1, "cannot open %s", filename);
-        fprintf(f, "%%%%MatrixMarket matrix array integer general\n");
-        fprintf(f, "%%block of left-kernel vector computed by lanczos_modp\n");
-        fprintf(f, "%d %d\n", nrows, ncols);
-        for (long j = 0; j < ncols; j++)
-                for (long i = 0; i < nrows; i++)
-                        fprintf(f, "%d\n", v[i*n + j]);
-        fclose(f);
+void singleProc(int argc, char **argv){
+        printf("doing single proc\n");
+        process_command_line_options(argc, argv);
+        struct sparsematrix_t M;
+
+        sparsematrix_mm_load(&M, matrix_filename);
+
+        u32 *kernel = block_lanczos(&M, n, right_kernel);
+ 
+        if (kernel_filename)
+                save_vector_block(kernel_filename, right_kernel ? M.ncols : M.nrows, n, kernel);
+        else
+                printf("Not saving result (no --output given)\n");
+        free(kernel);
+        
+        printf("finished single proc\n");
 }
 
 /*************************** main function *********************************/
@@ -1138,16 +1214,26 @@ int main(int argc, char ** argv)
         MPI_Init(&argc, &argv);
         MPI_Comm_rank(MPI_COMM_WORLD, &MPIrank);
         MPI_Comm_size(MPI_COMM_WORLD, &MPIsize);
+        if (MPIrank == 1){
+                singleProc(argc,argv);
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
         blockingSqrt = sqrtl(MPIsize);
-        MPI_Comm_split(MPI_COMM_WORLD, MPIrank/blockingSqrt, MPIrank, &row_comm);
+        MPI_Comm_split(MPI_COMM_WORLD, MPIrank/blockingSqrt, MPIrank, &line_comm);
+        MPI_Comm_split(MPI_COMM_WORLD, MPIrank%blockingSqrt, MPIrank, &col_comm);
         process_command_line_options(argc, argv);
         
         
         struct unique_block_t M;
         
-        block_sparsematrix_mm_load(&M, matrix_filename, MPIrank);
-        printf("finished load, r/s : %d/%d\n", MPIrank, MPIsize);
-        
+        load_uniqueblock_sparsematrix(&M, matrix_filename, MPIrank);
+        // printf("finished load, r/s : %d/%d\n", MPIrank, MPIsize);
+        // printf("saving what I read\n");
+        // struct sparsematrix_t T;
+        // unique_block_to_sparse_matrix(&M, &T);
+        // char name[20];
+        // sprintf(name, "blockMtx%d.mtx", MPIrank);
+        // save_sparse_matrix(name,&T);
         
         u32 *kernel = unique_block_lanczos(&M, n, right_kernel);
  
