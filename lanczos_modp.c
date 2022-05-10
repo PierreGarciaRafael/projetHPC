@@ -58,6 +58,8 @@ int expected_iterations;
 int MPIsize;
 /******************* thread variables ********************/
 int MPIrank;
+int MPIi;
+int MPIj;
 MPI_Comm line_comm;
 MPI_Comm col_comm;
 
@@ -242,7 +244,9 @@ int blockIndexToStart(int blockIndex, int blockWidth, int blockHeight, int colNb
 }
 
 int calcBlockSide(int len, int nBlocks){
+        
         return len/nBlocks + (len%nBlocks > 0);
+
 }
 
 void assertBlockMatrix(struct block_sparsematrix_t * M){
@@ -618,14 +622,15 @@ void sparse_matrix_vector_product(u32 * y, struct sparsematrix_t const * M, u32 
 /* y = M*x or y = transpose(M)*x, according to the transpose flag */ 
 void unique_block_vector_product(u32 *y, struct unique_block_t const * M, u32 const * x, bool transpose)
 {
+        printf("in ubvp %d\n",MPIrank);
         long nnz = M->nnz;
         int const * Mi = M->i;
         int const * Mj = M->j;
         u32 const * Mx = M->x;
         int nrows = transpose ? M->ncols : M->nrows;
         int ncols = transpose ? M->nrows : M->ncols;
-        int startI = (M->blockId/M->nblocksSqrt) * calcBlockSide(nrows, M->nblocksSqrt);
-        int startJ = (M->blockId%M->nblocksSqrt) * calcBlockSide(ncols, M->nblocksSqrt);
+        int startI = MPIi * calcBlockSide(nrows, M->nblocksSqrt);
+        int startJ = MPIj * calcBlockSide(ncols, M->nblocksSqrt);
         for (long i = 0; i < calcBlockSide(ncols,M->nblocksSqrt) * n; i++)
                 y[i] = 0;
 
@@ -642,21 +647,26 @@ void unique_block_vector_product(u32 *y, struct unique_block_t const * M, u32 co
 }
 
 //computes needed tmp for the next sp_mat_vec_prod, by sharing it with other processes.
-void getLineCalc(u32 *tmp, long size){
+void getLineCalc(u32 *tmp, long size, bool transpose){
         u32 *toReceive = NULL; //to remove warning : "may be uninitialized"
-        if (MPIrank%blockingSqrt == 0)
+        const MPI_Comm nowComm = transpose ? col_comm : line_comm;
+        int localRank;
+        MPI_Comm_rank(nowComm, &localRank);
+        if (localRank == 0)
                 toReceive = malloc((blockingSqrt) * (size*sizeof(*toReceive)));
         MPI_Gather(tmp, size, MPI_UINT32_T,
-                        toReceive, size, MPI_UINT32_T, 0, line_comm);
-        if (MPIrank%blockingSqrt == 0){
+                        toReceive, size, MPI_UINT32_T, 0, nowComm);
+        if (localRank == 0){
                 for (int pid=1; pid < blockingSqrt; pid += 1){
                         for(int i = 0; i < size; i += 1){
-                                tmp[i] = (tmp[i] + toReceive[pid*size + i])%prime;
+                                u64 a = tmp[i];
+                                u64 b = toReceive[pid*size + i];
+                                tmp[i] = (a + b)%prime;
                         }
                 }
         }
-        MPI_Bcast(tmp, size, MPI_UINT32_T, 0, line_comm);
-        if (MPIrank%blockingSqrt == 0)
+        MPI_Bcast(tmp, size, MPI_UINT32_T, 0, nowComm);
+        if (localRank == 0)
                 free(toReceive);
 }
 
@@ -1026,13 +1036,11 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                 p[i] = 0;
                 tmp[i] = 0;
         }
-        //in order to have the same start as single proc lanczos
-        if (MPIrank%blockingSqrt == 0){
-                for (int i = 0; i < MPIrank/blockingSqrt; i += 1)
-                        for (long i = 0; i < block_size; i++)
-                                v[0] = random64() % prime;
+        //in order to have the same random values as the single processor
+        for (int pid = 0; pid < (right_kernel ?  MPIj : MPIi); pid += 1){
+                for (long i = 0; i < block_size; i++)
+                        v[0] = random64() % prime;
         }
-        MPI_Bcast(rng_state,4,MPI_UINT64_T,0,line_comm);
         //we do all of this
         for (long i = 0; i < block_size; i++)
                 v[i] = random64() % prime;
@@ -1046,23 +1054,21 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
         
 
         /************* main loop *************/
-        printf("  - Main loop\n");
+        printf("  - Main loop %d/%d\n", MPIrank, MPIsize);
         start = wtime();
         bool stop = false;
         while (true) {
                 if (stop_after > 0 && n_iterations == stop_after)
                         break;
                 unique_block_vector_product(tmp, M, v, !transpose);
-                getLineCalc(tmp, block_size);
-                if (MPIrank % blockingSqrt == 0){
-                        char name[30];
-                        sprintf(name,"test_parallel%d.mtx",MPIrank/blockingSqrt);
-                        printf("saving %s\n", name);
-                        save_vector_block(name,
-                        calcBlockSide(nrows, blockingSqrt), n, tmp);
-                }
+                getLineCalc(tmp, block_size, !transpose);
                 unique_block_vector_product(Av, M, tmp, transpose);
-                getLineCalc(Av, block_size);
+                getLineCalc(Av, block_size, transpose);
+                char name[30];
+                sprintf(name,"test_parallel%d.mtx",MPIrank);
+                printf("saving %s\n", name);
+                save_vector_block(name,
+                calcBlockSide(nrows, blockingSqrt), n, Av);
                 break;
                 u32 vtAv[n * n];
                 u32 vtAAv[n * n];
@@ -1152,8 +1158,8 @@ u32 * block_lanczos(struct sparsematrix_t const * M, int n, bool transpose)
                         break;
 
                 sparse_matrix_vector_product(tmp, M, v, !transpose);
-                save_vector_block("test_single.mtx",nrows, n, tmp);
                 sparse_matrix_vector_product(Av, M, tmp, transpose);
+                save_vector_block("test_single.mtx",nrows, n, Av);
                 break;
                 u32 vtAv[n * n];
                 u32 vtAAv[n * n];
@@ -1214,33 +1220,43 @@ int main(int argc, char ** argv)
         MPI_Init(&argc, &argv);
         MPI_Comm_rank(MPI_COMM_WORLD, &MPIrank);
         MPI_Comm_size(MPI_COMM_WORLD, &MPIsize);
+        
         if (MPIrank == 1){
                 singleProc(argc,argv);
+                rng_state[0] = 0x1415926535;
+                rng_state[1] = 0x8979323846;
+                rng_state[2] = 0x2643383279;
+                rng_state[3] = 0x5028841971;
+
         }
         MPI_Barrier(MPI_COMM_WORLD);
         blockingSqrt = sqrtl(MPIsize);
         MPI_Comm_split(MPI_COMM_WORLD, MPIrank/blockingSqrt, MPIrank, &line_comm);
+        MPI_Comm_rank(line_comm, &MPIj);
         MPI_Comm_split(MPI_COMM_WORLD, MPIrank%blockingSqrt, MPIrank, &col_comm);
+        MPI_Comm_rank(col_comm, &MPIi);
+        printf("r/s->i,j=%d/%d->%d,%d\n", MPIrank, MPIsize, MPIi, MPIj);
         process_command_line_options(argc, argv);
         
         
         struct unique_block_t M;
-        
+        //int toLoadIdx = right_kernel ? MPIrank : MPIrank/blockingSqrt + blockingSqrt*(MPIrank%blockingSqrt) ;
         load_uniqueblock_sparsematrix(&M, matrix_filename, MPIrank);
-        // printf("finished load, r/s : %d/%d\n", MPIrank, MPIsize);
-        // printf("saving what I read\n");
-        // struct sparsematrix_t T;
-        // unique_block_to_sparse_matrix(&M, &T);
-        // char name[20];
-        // sprintf(name, "blockMtx%d.mtx", MPIrank);
-        // save_sparse_matrix(name,&T);
+        printf("finished load, r/s : %d/%d\n", MPIrank, MPIsize);
+        printf("saving what I read\n");
+        struct sparsematrix_t T;
+        unique_block_to_sparse_matrix(&M, &T);
+        char name[20];
+        sprintf(name, "blockMtx%d.mtx", MPIrank);
+        save_sparse_matrix(name,&T);
         
         u32 *kernel = unique_block_lanczos(&M, n, right_kernel);
- 
-        if (kernel_filename)
-                save_vector_block(kernel_filename, right_kernel ? M.ncols : M.nrows, n, kernel);
-        else
-                printf("Not saving result (no --output given)\n");
+        if (MPIrank == 0){
+                if (kernel_filename)
+                        save_vector_block(kernel_filename, right_kernel ? M.ncols : M.nrows, n, kernel);
+                else
+                        printf("Not saving result (no --output given)\n");
+        }
         free(kernel);
         
         MPI_Finalize();
