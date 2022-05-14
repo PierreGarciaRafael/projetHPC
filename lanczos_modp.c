@@ -930,9 +930,16 @@ void verbosity()
         fflush(stdout);
 }
 
+void check_symmetry(u32 const * block){
+        for (int i = 0; i < n; i++) 
+                for (int j = 0; j < n; j++)
+                        assert(block[i*n + j] == block[j*n + i]);
+}
+
 /* optional tests */
 void correctness_tests(u32 const * vtAv, u32 const * vtAAv, u32 const * winv, u32 const * d)
 {
+        
         /* vtAv, vtAAv, winv are actually symmetric + winv and d match */
         for (int i = 0; i < n; i++) 
                 for (int j = 0; j < n; j++) {
@@ -1127,7 +1134,7 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
         bool stop = false;
         int it = 0;
         while (true) {
-                
+                printf("iteration number %d\n",it);
                 if (stop_after > 0 && n_iterations == stop_after)
                         break;
                 unique_block_vector_product(tmp, M, v, !transpose);
@@ -1151,6 +1158,7 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                                         vtAv[i] = (a+b)%prime;
                                 }
                         }//here all diagonals have the same result
+                        //check_symmetry(vtAv);
                 }
                 else if (MPIi == 0  || (MPIj == 0 && MPIi == 1)) // have to compute vAtAv
                 {
@@ -1324,14 +1332,13 @@ int main(int argc, char ** argv)
         MPI_Comm_rank(MPI_COMM_WORLD, &MPIrank);
         MPI_Comm_size(MPI_COMM_WORLD, &MPIsize);
         
-        if (MPIrank == 1){
-                singleProc(argc,argv);
-                rng_state[0] = 0x1415926535;
-                rng_state[1] = 0x8979323846;
-                rng_state[2] = 0x2643383279;
-                rng_state[3] = 0x5028841971;
-
-        }
+        // if (MPIrank == 1){
+        //         singleProc(argc,argv);
+        //         rng_state[0] = 0x1415926535;
+        //         rng_state[1] = 0x8979323846;
+        //         rng_state[2] = 0x2643383279;
+        //         rng_state[3] = 0x5028841971;
+        // }
         MPI_Barrier(MPI_COMM_WORLD);
         blockingSqrt = sqrtl(MPIsize);
         MPI_Comm_split(MPI_COMM_WORLD, MPIrank/blockingSqrt, MPIrank, &line_comm);
@@ -1341,7 +1348,6 @@ int main(int argc, char ** argv)
         MPI_Comm_split(MPI_COMM_WORLD, blockingSqrt + MPIi-MPIj, MPIrank, &diag_comm);
         MPI_Comm_rank(diag_comm, &MPIdiag);
         MPI_Comm_split(MPI_COMM_WORLD, (MPIi == 0 && MPIj !=0) || (MPIj == 0 && MPIi == 1) , MPIj, &vAtAv_comm);
-        printf("r/s->i,j,diag=%d/%d->%d,%d,%d\n", MPIrank, MPIsize, MPIi, MPIj,MPIdiag);
         process_command_line_options(argc, argv);
         
         

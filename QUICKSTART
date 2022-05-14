@@ -11,9 +11,10 @@ $ tar xzf TF16.tar.gz
 Calcul de vecteurs du noyau (Ax == 0)
 -------------------------------------
 
-./lanczos_modp --matrix TF16/TF16.mtx --prime 65537 --right --n 2 --output kernel.mtx
-mpirun -np 4 lanczos_modp --matrix challenge_easy.mtx --prime 65537 --right --n 2  --output kernel.mtx
-mpirun -np 4 lanczos_modp --matrix rbsa480/rbsa480.mtx --prime 65537 --right --n 2 --output kernel.mtx
+mpirun -np 4 lanczos_modp --matrix TF16/TF16.mtx --prime 65537 --right --n 2 --output kernel_TF.mtx
+mpirun -np 4 lanczos_modp --matrix challenge_easy.mtx --prime 65537 --right --n 10  --output kernel_easy.mtx
+mpirun -np 4 lanczos_modp --matrix rbsa480/rbsa480.mtx --prime 65537 --right --n 10 --output kernel_480.mtx
+mpirun -np 4 lanczos_modp --matrix test.mtx --prime 65537 --right --n 2 --output kernel_480.mtx
 
 
 
