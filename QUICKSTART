@@ -19,8 +19,15 @@ mpirun -np 4 lanczos_modp --matrix rbsa480/rbsa480ns2.mtx --prime 65537 --right 
 mpirun -np 4 lanczos_modp --matrix test.mtx --prime 65537 --right --n 20 --output kernel_test.mtx
 
 
-mpirun -np 4 lanczos_modp --matrix TF/TF10.mtx --prime 65537 --right --n 10 --output kernel_TF10.mtx
-mpirun -np 4 lanczos_modp --matrix TF/TF16.mtx --prime 65537 --right --n 20 --output kernel_TF16.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF10.mtx --prime 65537 --right --n 40 --output kernel_TF10.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF12.mtx --prime 65537 --right --n 20 --output kernel_TF12.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF12.mtx --prime 65537 --right --n 20 --one --output kernel_TF12.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF14.mtx --prime 65537 --right --n 20 --output kernel_TF14.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF14.mtx --prime 65537 --right --n 20 --one --output kernel_TF14.mtx
+
+mpirun -np 4 lanczos_modp --matrix TF/TF16.mtx --prime 65537 --right --one --n 20 --output kernel_TF16.mtx
+
+
 mpirun -np 4 lanczos_modp --matrix TF/TF17.mtx --prime 65537 --right --n 30 --output kernel_TF17.mtx
 mpirun -np 4 lanczos_modp --matrix TF/TF18.mtx --prime 65537 --right --n 40 --output kernel_TF18.mtx
 

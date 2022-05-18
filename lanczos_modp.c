@@ -58,6 +58,8 @@ int pivots = 1;
 
 int MPIsize;
 /******************* thread variables ********************/
+bool isSingle;
+
 int MPIrank;
 int MPIi;
 int MPIj;
@@ -189,6 +191,7 @@ void process_command_line_options(int argc, char ** argv)
                 {"output-file", required_argument, NULL, 'o'},
                 {"right", no_argument, NULL, 'r'},
                 {"left", no_argument, NULL, 'l'},
+                {"one", no_argument, NULL, '1'},
                 {"stop-after", required_argument, NULL, 's'},
                 {NULL, 0, NULL, 0}
         };
@@ -201,9 +204,9 @@ void process_command_line_options(int argc, char ** argv)
                 case 'n':
                         n = atoi(optarg);
                         break;
-                // case 'b':
-                //         blockingSqrt = atoi(optarg);
-                //         break;
+                case '1':
+                        isSingle = 1;
+                        break;
                 case 'p':
                         prime = atoll(optarg);
                         break;
@@ -1041,18 +1044,20 @@ void save_vector_block_MPI(char const * filenameInit, int nrows, u32 * v, bool t
         fprintf(f, "%%block of left-kernel vector computed by lanczos_modp\n");
         fprintf(f, "%ld %d\n", n, nrows);
         u32 **toSave = &v;
-        u32 * toLoad = malloc(calcBlockSide(nrows, blockingSqrt) * n*sizeof(u32));
+        u32 * v2 = malloc(calcBlockSide(nrows, blockingSqrt) * n*sizeof(u32));
+        u32 **toLoadOn = &v2;
         MPI_Request req;
         for (int pid = 1; pid < blockingSqrt; pid += 1){
                 int sizeToRecv = ((pid == blockingSqrt - 1) ?
                         (nrows - (blockingSqrt-1) * calcBlockSide(nrows, blockingSqrt)) :
                         (calcBlockSide(nrows, blockingSqrt)));
-                MPI_Irecv(toLoad, n*sizeToRecv, MPI_UINT32_T, pid, 0, now_comm, &req);
+                MPI_Irecv((*toLoadOn), n*sizeToRecv, MPI_UINT32_T, pid, 0, now_comm, &req);
                 for (long i = 0; i < calcBlockSide(nrows, blockingSqrt); i++)
                                 for (long j = 0; j < n; j++)
                                 fprintf(f, "%d\n", (* toSave)[i*n + j]);
                 MPI_Wait(&req, MPI_STATUS_IGNORE);
-                toSave = &toLoad;
+                toSave = pid%2 == 1 ? &v2 : &v;
+                toLoadOn = pid%2 == 1 ? &v : &v2;
         }
         for (long i = 0; i < nrows - (blockingSqrt-1) * calcBlockSide(nrows, blockingSqrt); i++)
                 for (long j = 0; j < n; j++)
@@ -1163,48 +1168,43 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
 
                 u32 vtAv[n * n];
                 u32 vtAAv[n * n];
-                if (MPIi == MPIj) // have to compute vtAv
+                if (MPIi == 0) // have to compute vtAv
                 {
                         compute_vtAv(vtAv, myRowSize, Av, v);
                         u32 toSum[n*n*blockingSqrt];
-                        MPI_Allgather(  vtAv,  n*n, MPI_UINT32_T,
-                                        toSum, n*n, MPI_UINT32_T, diag_comm);
-                        for (int pid = 0; pid < blockingSqrt; pid += 1){
-                                if (pid == MPIi) continue;
-                                for (int i = 0; i < n*n; i += 1){
-                                        u64 a = toSum[pid*n*n + i];
-                                        u64 b = vtAv[i];
-                                        vtAv[i] = (a+b)%prime;
-                                }
-                        }//here all diagonals have the same result
+                        MPI_Gather(  vtAv,  n*n, MPI_UINT32_T,
+                                        toSum, n*n, MPI_UINT32_T, 0, line_comm);
+                        if (MPIj==0)
+                                for (int pid = 0; pid < blockingSqrt; pid += 1){
+                                        if (pid == MPIj) continue;
+                                        for (int i = 0; i < n*n; i += 1){
+                                                u64 a = toSum[pid*n*n + i];
+                                                u64 b = vtAv[i];
+                                                vtAv[i] = (a+b)%prime;
+                                        }
+                                }//here first procs has vtAv
                         //check_symmetry(vtAv);
                 }
-                else if (MPIi == 0  || (MPIj == 0 && MPIi == 1)) // have to compute vAtAv
-                {
-                        int size;
-                        MPI_Comm_size(vAtAv_comm, &size);
-                        
+                else if ( MPIi == 1) // have to compute vAtAv
+                {                        
                         u32 toSum[n*n*blockingSqrt];
                         compute_vAtAv(vtAAv, myRowSize, Av);
-                        MPI_Allgather(
+                        MPI_Gather(
                                 vtAAv, n*n, MPI_UINT32_T,
-                                toSum, n*n, MPI_UINT32_T, vAtAv_comm);
-                        for (int pid = 0; pid < blockingSqrt; pid += 1){
-                                if (pid == MPIj) continue;
-                                for (int i = 0; i < n*n; i += 1){
-                                        u64 a = toSum[pid*n*n + i];
-                                        u64 b = vtAAv[i];
-                                        vtAAv[i] = (a+b)%prime;
-                                }
-                        }// here all top line procs have the good result except for the first one which is on the second line
+                                toSum, n*n, MPI_UINT32_T, 0, line_comm);
+                        if (MPIj == 0)
+                                for (int pid = 0; pid < blockingSqrt; pid += 1){
+                                        if (pid == MPIj) continue;
+                                        for (int i = 0; i < n*n; i += 1){
+                                                u64 a = toSum[pid*n*n + i];
+                                                u64 b = vtAAv[i];
+                                                vtAAv[i] = (a+b)%prime;
+                                        }
+                                }// here the first 2nd line proc have the good result
                 }
                 MPI_Request vtAAvRequest;
-                if (MPIj == 0){
-                        MPI_Ibcast(vtAAv, n*n, MPI_UINT32_T, 1, col_comm, &vtAAvRequest);
-                }else{
-                        MPI_Ibcast(vtAAv, n*n, MPI_UINT32_T, 0, col_comm, &vtAAvRequest);
-                }
-                MPI_Bcast(vtAv, n*n, MPI_UINT32_T, MPIi, line_comm);
+                MPI_Ibcast(vtAAv, n*n, MPI_UINT32_T, blockingSqrt, MPI_COMM_WORLD, &vtAAvRequest);
+                MPI_Bcast(vtAv, n*n, MPI_UINT32_T, 0, MPI_COMM_WORLD);
                 
                 
 
@@ -1390,14 +1390,14 @@ int main(int argc, char ** argv)
         MPI_Init(&argc, &argv);
         MPI_Comm_rank(MPI_COMM_WORLD, &MPIrank);
         MPI_Comm_size(MPI_COMM_WORLD, &MPIsize);
-        
-        // if (MPIrank == 1){
-        //         singleProc(argc,argv);
-        //         rng_state[0] = 0x1415926535;
-        //         rng_state[1] = 0x8979323846;
-        //         rng_state[2] = 0x2643383279;
-        //         rng_state[3] = 0x5028841971;
-        // }
+        process_command_line_options(argc,argv);
+        if (isSingle){
+                if (MPIrank == 1){
+                        singleProc(argc,argv);
+                }
+                MPI_Finalize();
+                exit(EXIT_SUCCESS);
+        }
         MPI_Barrier(MPI_COMM_WORLD);
         blockingSqrt = sqrtl(MPIsize);
         MPI_Comm_split(MPI_COMM_WORLD, MPIrank/blockingSqrt, MPIrank, &line_comm);
@@ -1407,7 +1407,7 @@ int main(int argc, char ** argv)
         MPI_Comm_split(MPI_COMM_WORLD, blockingSqrt + MPIi-MPIj, MPIrank, &diag_comm);
         MPI_Comm_rank(diag_comm, &MPIdiag);
         MPI_Comm_split(MPI_COMM_WORLD, (MPIi == 0 && MPIj !=0) || (MPIj == 0 && MPIi == 1) , MPIj, &vAtAv_comm);
-        process_command_line_options(argc,argv);
+        
         
         struct unique_block_t M;
         load_uniqueblock_sparsematrix(&M, matrix_filename, MPIrank);
