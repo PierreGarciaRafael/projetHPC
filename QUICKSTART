@@ -11,14 +11,23 @@ $ tar xzf TF16.tar.gz
 Calcul de vecteurs du noyau (Ax == 0)
 -------------------------------------
 
-mpirun -np 4 lanczos_modp --matrix TF16/TF16.mtx --prime 65537 --right --n 2 --output kernel_TF.mtx
-mpirun -np 4 lanczos_modp --matrix challenge_easy.mtx --prime 65537 --right --n 10  --output kernel_easy.mtx
+mpirun -np 4 lanczos_modp --matrix challenge_easy.mtx --prime 65537 --right --n 40  --output kernel_easy.mtx
 mpirun -np 4 lanczos_modp --matrix rbsa480/rbsa480.mtx --prime 65537 --right --n 10 --output kernel_480.mtx
-mpirun -np 4 lanczos_modp --matrix test.mtx --prime 65537 --right --n 2 --output kernel_480.mtx
+mpirun -np 4 lanczos_modp --matrix rbsa480/rbsa480ns.mtx --prime 65537 --right --n 10 --output kernel_480ns.mtx
+mpirun -np 4 lanczos_modp --matrix rbsa480/rbsa480ns2.mtx --prime 65537 --right --n 10 --output kernel_480ns2.mtx
 
+mpirun -np 4 lanczos_modp --matrix test.mtx --prime 65537 --right --n 20 --output kernel_test.mtx
+
+
+mpirun -np 4 lanczos_modp --matrix TF/TF10.mtx --prime 65537 --right --n 10 --output kernel_TF10.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF16.mtx --prime 65537 --right --n 20 --output kernel_TF16.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF17.mtx --prime 65537 --right --n 30 --output kernel_TF17.mtx
+mpirun -np 4 lanczos_modp --matrix TF/TF18.mtx --prime 65537 --right --n 40 --output kernel_TF18.mtx
 
 
 Vérification du calcul
 ----------------------
 
-$ ./checker_modp --matrix TF16/TF16.mtx --prime 65537 --right --kernel kernel.mtx
+./checker_modp --matrix TF10/TF10.mtx --prime 65537 --right --kernel recordings/kernel_TF10.mtx
+./checker_modp --matrix test.mtx --prime 65537 --right --kernel recordings/kernel_test.mtx
+./checker_modp --matrix TF10/TF10.mtx --prime 65537 --right --kernel recordings/single_proc_kernel_TF10.mtx

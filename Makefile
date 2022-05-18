@@ -7,3 +7,6 @@ ma:
 clean:
 	rm -f *.o
 	rm -f lanczos_modp checker_modp
+
+cleanRec:
+	rm -f recordings/*
