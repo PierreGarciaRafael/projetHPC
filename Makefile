@@ -2,7 +2,8 @@ pi:
 	make -f pierre.mak
 ma:
 	make -f malik.mak
-
+grid:
+	make -f grid.mak
 
 clean:
 	rm -f *.o

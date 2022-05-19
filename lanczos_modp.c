@@ -29,7 +29,7 @@
 #include <sys/stat.h>
 #include <assert.h>
 
-#include <mmio.h>
+#include "mmio.h"
 
 #include <mpi.h>
 
