@@ -1134,9 +1134,7 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                         }else{
                                 random64();
                         }
-                }
-
-                
+                } 
         }
 
         // char name[50];

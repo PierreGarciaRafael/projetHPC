@@ -35,6 +35,6 @@ mpirun -np 4 lanczos_modp --matrix TF/TF18.mtx --prime 65537 --right --n 40 --ou
 Vérification du calcul
 ----------------------
 
-./checker_modp --matrix TF10/TF10.mtx --prime 65537 --right --kernel recordings/kernel_TF10.mtx
+./checker_modp --matrix TF/TF12.mtx --prime 65537 --right recordings/kernel_TF12.mtx
 ./checker_modp --matrix test.mtx --prime 65537 --right --kernel recordings/kernel_test.mtx
 ./checker_modp --matrix TF10/TF10.mtx --prime 65537 --right --kernel recordings/single_proc_kernel_TF10.mtx
