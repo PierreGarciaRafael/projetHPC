@@ -181,6 +181,7 @@ void usage(char ** argv)
         printf("--left                      compute left kernel vectors [default]\n");
         printf("--stop-after N              stop the algorithm after N iterations\n");
         printf("--save FILENAME             the filename prefix for saves\n");
+        printf("--recover FILENAME          the filename prefix for recovering a save\n");
         printf("--one                       wether or not you want you want a single proc to compute \n");
 
         printf("\n");
@@ -1207,9 +1208,8 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                 for (long rowId = 0; rowId < nrows; rowId++){
                         for (int colId = 0; colId < n; colId ++){
                                 if (rowId/calcBlockSide(nrows, blockingSqrt) == (transpose ? MPIj : MPIi)){
-                                        int i = rowId*n + colId; 
                                         v[(rowId - calcBlockSide(nrows, blockingSqrt) * (rowId/calcBlockSide(nrows, blockingSqrt)))*n
-                                        + colId] = i % prime;
+                                        + colId] = random64() % prime;
                                 }else{
                                         random64();
                                 }
@@ -1300,7 +1300,7 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                         v[i] = tmp[i];
                 if (MPIrank == 0)        
                         verbosity();
-                if (wtime() - lastSaveTime > 5){
+                if (wtime() - lastSaveTime > 60){
                         printf("%f", wtime() - lastSaveTime);
                         save_state(v, p, myRowSize);
                         lastSaveTime = wtime();
