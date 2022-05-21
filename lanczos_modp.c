@@ -44,6 +44,8 @@ long n = 1;
 u64 prime;
 char *matrix_filename;
 char *kernel_filename;
+char *save_prefix = "save";
+char *load_prefix;
 bool right_kernel = false;
 int stop_after = -1;
 int blockingSqrt;
@@ -57,6 +59,9 @@ int expected_iterations;
 int pivots = 1;
 
 int MPIsize;
+double lastSaveTime;
+bool recovering = false;
+
 /******************* thread variables ********************/
 bool isSingle;
 
@@ -175,6 +180,9 @@ void usage(char ** argv)
         printf("--right                     compute right kernel vectors\n");
         printf("--left                      compute left kernel vectors [default]\n");
         printf("--stop-after N              stop the algorithm after N iterations\n");
+        printf("--save FILENAME             the filename prefix for saves\n");
+        printf("--one                       wether or not you want you want a single proc to compute \n");
+
         printf("\n");
         printf("The --matrix and --prime arguments are required\n");
         printf("The --stop-after and --output-file arguments mutually exclusive\n");
@@ -183,15 +191,18 @@ void usage(char ** argv)
 
 void process_command_line_options(int argc, char ** argv)
 {
-        struct option longopts[9] = {
+        struct option longopts[11] = {
                 {"matrix", required_argument, NULL, 'm'},
                 {"prime", required_argument, NULL, 'p'},
                 {"n", required_argument, NULL, 'n'},
                 // {"block-sqrt", required_argument, NULL, 'b'},
                 {"output-file", required_argument, NULL, 'o'},
+                {"save", required_argument, NULL, 'f'},
+                {"recover", required_argument, NULL, 'c'},
                 {"right", no_argument, NULL, 'r'},
                 {"left", no_argument, NULL, 'l'},
                 {"one", no_argument, NULL, '1'},
+                
                 {"stop-after", required_argument, NULL, 's'},
                 {NULL, 0, NULL, 0}
         };
@@ -209,6 +220,13 @@ void process_command_line_options(int argc, char ** argv)
                         break;
                 case 'p':
                         prime = atoll(optarg);
+                        break;
+                case 'f':
+                        save_prefix = optarg;
+                        break;
+                case 'c':
+                        recovering = true;
+                        load_prefix = optarg;
                         break;
                 case 'o':
                         kernel_filename = optarg;
@@ -228,7 +246,7 @@ void process_command_line_options(int argc, char ** argv)
         }
 
         /* missing required args? */
-        if (matrix_filename == NULL || prime == 0)
+        if ((matrix_filename == NULL || prime == 0) && !recovering)
                 usage(argv);
         /* exclusive arguments? */
         if (kernel_filename != NULL && stop_after > 0)
@@ -1013,18 +1031,91 @@ void save_vector_block(char const * filenameInit, int nrows, int ncols, u32 cons
         fclose(f);
 }
 
+u32 * load_vector_block(char const * filenameInit, int * nrows, long * ncols){
+        char filename[80];
+        sprintf(filename, "recordings/%s",filenameInit);
+        printf("Loading dense vector block in %s\n", filename);
+        FILE * f = fopen(filename, "r");
+        if (f == NULL)
+                err(1, "cannot open %s", filename);
+        char line [1000];
+        fgets(line,sizeof (line),f);
+        fgets(line,sizeof (line),f);
+        fscanf(f,"%d %ld\n", nrows, ncols);
+        u32 * toReturn = malloc((*nrows)*(*ncols)*sizeof(toReturn));
+        for (long j = 0; j < (*ncols); j++)
+                for (long i = 0; i < (*nrows); i++)
+                        fscanf(f, "%d\n", &toReturn[i*(*ncols)+ j]);
+        fclose(f);
+        return toReturn;
+}
+
+int isEvenSave = true;
+void load_save_state(u32 ** v, u32 ** p){
+        char filename[80];
+        sprintf(filename, "recordings/%sState.lbs", load_prefix);
+        if (MPIrank == 0)
+                printf("loading save state in %s\n", filename);
+        FILE * f = fopen(filename, "r");
+        if (f == NULL)
+                err(1, "cannot open %s", filename);
+        char line [1000];
+        fgets(line,sizeof (line),f);
+        int requiredSize;
+        float time;
+        fscanf(f, "%d %ld %llu %f %d\n", &requiredSize, &n, &prime, &time, &isEvenSave);
+        if (requiredSize != MPIsize)
+                err(1,"error, mpi size must be the same as previously!\n");
+        if (MPIrank == 0)
+                printf("saved after %.1fs of computation",time);
+        matrix_filename = malloc(40*sizeof(char));
+        save_prefix = malloc(40*sizeof(char));
+        fscanf(f,"%s\n", matrix_filename);
+        fscanf(f,"%s\n", save_prefix);
+        char vFname[80];
+        char pFname[80];
+        sprintf(vFname, "%s%dv%d.mtx", save_prefix, isEvenSave, MPIrank);
+        sprintf(pFname, "%s%dp%d.mtx", save_prefix, isEvenSave, MPIrank);
+        int nrows;
+        (*v) = load_vector_block(vFname, &nrows, &n);
+        (*p) = load_vector_block(pFname, &nrows, &n);
+}
+
+
+void save_state(const u32 * v, const u32 * p, int nrows){
+        if (MPIrank==0){
+                char filename[80];
+                sprintf(filename, "recordings/%sState.lbs", save_prefix);
+                printf("saving state in %s\n", filename);
+                FILE * f = fopen(filename, "w");
+                fprintf(f, "%% np n prime ellapsedTime isEven\\n matrix \\n save_prefix \n");
+                fprintf(f, "%d %ld %llu %f %d\n", MPIsize, n, prime, (float)(wtime() - start), isEvenSave);
+                fprintf(f, "%s\n", matrix_filename);
+                fprintf(f, "%s\n", save_prefix);
+                fclose(f);
+        }
+        char vFname[80];
+        char pFname[80];
+        sprintf(vFname, "%s%dv%d.mtx",save_prefix, isEvenSave, MPIrank);
+        sprintf(pFname, "%s%dp%d.mtx",save_prefix, isEvenSave, MPIrank);
+        save_vector_block(vFname, nrows, n, v);
+        save_vector_block(pFname, nrows, n, p);
+        isEvenSave = !isEvenSave;
+}
+
+
 void save_vector_block_MPI(char const * filenameInit, int nrows, u32 * v)
 {       
         if (MPIrank >= blockingSqrt) return;
-        printf("int save_vector_block_MPI %d/%d\n",MPIrank,MPIsize);
+        printf("in save_vector_block_MPI %d/%d\n",MPIsize, MPIrank);
         
         int blockSize = calcBlockSide(nrows, blockingSqrt);
         u32 *fullV=NULL;
         if (MPIrank == 0)
                 fullV = malloc(n*(blockSize*blockingSqrt));
         MPI_Gather(
-                v, blockSize*n, MPI_UINT32_T, 
-                fullV, blockSize*n, MPI_UINT32_T, 0, line_comm);
+                v,      blockSize*n, MPI_UINT32_T, 
+                fullV,  blockSize*n, MPI_UINT32_T, 0, line_comm);
 
         if (MPIrank > 0) return;
         char filename[80];
@@ -1060,7 +1151,7 @@ void save_sparse_matrix(char const * filename, struct sparsematrix_t const * M)
 
 
 /* Solve x*M == 0 or M*x == 0 (if transpose == True) */
-u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpose)
+u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpose, u32 * save_v, u32 * save_p)
 {
         printf("Block Lanczos parallel r/s %d/%d\n", MPIrank, MPIsize);
 
@@ -1072,6 +1163,8 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
         int myRowSize = MPIj == blockingSqrt - 1 ?
                 nrows - (blockingSqrt-1) * calcBlockSide(nrows, blockingSqrt) :
                 calcBlockSide(nrows, blockingSqrt);
+        // save_prefix = "test";
+        // save_state(save_v, save_p, myRowSize);
         int myColSize = MPIi == blockingSqrt - 1 ?
                 ncols - (blockingSqrt-1) * calcBlockSide(ncols, blockingSqrt) :
                 calcBlockSide(ncols, blockingSqrt);
@@ -1086,9 +1179,7 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
         u32 *tmp = malloc(sizeof(*tmp) * block_size_pad);
         u32 *Av = malloc(sizeof(*Av) * block_size_pad);
         u32 *p = malloc(sizeof(*p) * block_size_pad);
-        if (v == NULL || tmp == NULL || Av == NULL || p == NULL)
-                errx(1, "impossible d'allouer les blocs de vecteur");
-        
+
         /* warn the user */
         if (MPIrank == 0){
                 expected_iterations = 1 + ncols / n;
@@ -1099,22 +1190,34 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
         /* prepare initial values */
         for (long i = 0; i < block_size_pad; i++) {
                 Av[i] = 0;
+                tmp[i] = 0;
                 v[i] = 0;
                 p[i] = 0;
-                tmp[i] = 0;
+
         }
+        if (recovering){
+                for (long i = 0; i < myRowSize*n; i++){
+                        v[i] = save_v[i];
+                        p[i] = save_p[i];
+                }
+                free(save_v);
+                free(save_p);
+        }else{
         //in order to have the same random values as the single processor
-        for (long rowId = 0; rowId < nrows; rowId++){
-                for (int colId = 0; colId < n; colId ++){
-                        if (rowId/calcBlockSide(nrows, blockingSqrt) == (transpose ? MPIj : MPIi)){
-                                int i = rowId*n + colId; 
-                                v[(rowId - calcBlockSide(nrows, blockingSqrt) * (rowId/calcBlockSide(nrows, blockingSqrt)))*n
-                                + colId] = i % prime;
-                        }else{
-                                random64();
-                        }
-                } 
+                for (long rowId = 0; rowId < nrows; rowId++){
+                        for (int colId = 0; colId < n; colId ++){
+                                if (rowId/calcBlockSide(nrows, blockingSqrt) == (transpose ? MPIj : MPIi)){
+                                        int i = rowId*n + colId; 
+                                        v[(rowId - calcBlockSide(nrows, blockingSqrt) * (rowId/calcBlockSide(nrows, blockingSqrt)))*n
+                                        + colId] = i % prime;
+                                }else{
+                                        random64();
+                                }
+                        } 
+                }
         }
+        if (v == NULL || tmp == NULL || Av == NULL || p == NULL)
+                errx(1, "impossible d'allouer les blocs de vecteur");
 
         // char name[50];
         // sprintf(name,"startVec%d.mtx",MPIrank);
@@ -1127,20 +1230,14 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
         start = wtime();
         bool stop = false;
         printf("row : %d col : %d\n", myRowSize, myColSize);
+        lastSaveTime = wtime();
         while (true) {
                 if (stop_after > 0 && n_iterations >= stop_after)
                         break;
                 unique_block_vector_product(tmp, M, v, !transpose);
                 getLineCalc(tmp, myColSize*n, !transpose);
                 unique_block_vector_product(Av, M, tmp, transpose);
-                //char name[100];
-                // sprintf(name, "Av%dit%d.mtx", MPIrank, it);
-                // save_vector_block(name,
-                // myRowSize, n, Av);
                 getLineCalc(Av, myRowSize*n, transpose);
-                // sprintf(name, "Av%dit%dMerged.mtx", MPIrank, it);
-                // save_vector_block(name,
-                // myRowSize, n, Av);
 
                 u32 vtAv[n * n];
                 u32 vtAAv[n * n];
@@ -1191,11 +1288,6 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
 
                 
                 MPI_Wait(&vtAAvRequest, MPI_STATUS_IGNORE);
-                // sprintf(name, "vtAAv%dit%d.mtx", MPIrank, it);
-                // save_vector_block(name, n, n, vtAAv);
-                // sprintf(name, "vtAv%dit%d.mtx", MPIrank, it);
-                // save_vector_block(name, n, n, vtAv);
-
                 correctness_tests(vtAv, vtAAv, winv, d);
                 
                 if (stop)
@@ -1206,14 +1298,13 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                 /* the next value of v is in tmp ; copy */
                 for (long i = 0; i < block_size_pad; i++)
                         v[i] = tmp[i];
-                // sprintf(name, "test_parallel_p%dit%d.mtx", MPIrank, it);
-                // save_vector_block(name,
-                // calcBlockSide(nrows, blockingSqrt), n, p);
-                // sprintf(name, "test_parallel_v%dit%d.mtx", MPIrank, it);
-                // save_vector_block(name,
-                // calcBlockSide(nrows, blockingSqrt), n, v);
                 if (MPIrank == 0)        
                         verbosity();
+                if (wtime() - lastSaveTime > 5){
+                        printf("%f", wtime() - lastSaveTime);
+                        save_state(v, p, myRowSize);
+                        lastSaveTime = wtime();
+                }
         }
         printf("\n");
 
@@ -1364,6 +1455,7 @@ int main(int argc, char ** argv)
         MPI_Comm_rank(MPI_COMM_WORLD, &MPIrank);
         MPI_Comm_size(MPI_COMM_WORLD, &MPIsize);
         process_command_line_options(argc,argv);
+
         if (isSingle){
                 if (MPIrank == 1){
                         singleProc(argc,argv);
@@ -1381,16 +1473,15 @@ int main(int argc, char ** argv)
         MPI_Comm_rank(diag_comm, &MPIdiag);
         MPI_Comm_split(MPI_COMM_WORLD, (MPIi == 0 && MPIj !=0) || (MPIj == 0 && MPIi == 1) , MPIj, &vAtAv_comm);
         
-        
+        u32 *v = NULL;
+        u32 *p = NULL;
+
+        if (recovering){
+                load_save_state(&v,&p);
+        }
         struct unique_block_t M;
         load_uniqueblock_sparsematrix(&M, matrix_filename, MPIrank);
-        struct sparsematrix_t toSave;
-        unique_block_to_sparse_matrix(&M, &toSave);
-        char toSaveName[50];
-        sprintf(toSaveName, "recordings/myPart%d.mtx",MPIrank);
-        save_sparse_matrix(toSaveName, &toSave);
-
-        u32 *kernel = unique_block_lanczos(&M, n, right_kernel);
+        u32 *kernel = unique_block_lanczos(&M, n, right_kernel, v, p);
         printf("after kernel calc %d\n",MPIrank);
         if (kernel_filename)
                 save_vector_block_MPI(kernel_filename,

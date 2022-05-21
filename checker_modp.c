@@ -169,7 +169,7 @@ int main(int argc, char **argv)
                 int i, j;
                 u32 v;
                 if (3 != fscanf(matrix_file, "%d %d %d\n", &i, &j, &v))
-                        errx(1, "parse error entry %ld\n", u);
+                        errx(1, "parse error entry %lld\n", u);
                 i -= 1;  /* MatrixMarket is 1-based */
                 j -= 1;
                 u64 vv = v % prime;
