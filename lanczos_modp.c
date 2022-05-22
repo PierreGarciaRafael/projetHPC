@@ -35,6 +35,12 @@
 
 #include <math.h>
 
+#ifdef __APPLE__
+#define LU "%llu"
+#else
+#define LU "%lu"
+#endif
+
 typedef uint64_t u64;
 typedef uint32_t u32;
 
@@ -529,7 +535,7 @@ void load_uniqueblock_sparsematrix(struct unique_block_t * M, char const * filen
                         BMx[nowSize] = x;
                         nowSize += 1;
                 }
-                // verbosity
+                // verbosity [...]
                 if ((u & 0xffff) == 0xffff) {
                         double elapsed = wtime() - start;
                         double percent = (100. * u) / nnz;
@@ -1064,7 +1070,9 @@ void load_save_state(u32 ** v, u32 ** p){
         fgets(line,sizeof (line),f);
         int requiredSize;
         float time;
-        fscanf(f, "%d %ld %llu %f %d\n", &requiredSize, &n, &prime, &time, &isEvenSave);
+        fscanf(f, "%d %ld", &requiredSize, &n);
+        fscanf(f, LU, &prime);
+        fscanf(f, "%f %d\n", &time, &isEvenSave);
         if (requiredSize != MPIsize)
                 err(1,"error, mpi size must be the same as previously!\n");
         if (MPIrank == 0)
@@ -1090,7 +1098,9 @@ void save_state(const u32 * v, const u32 * p, int nrows){
                 printf("saving state in %s\n", filename);
                 FILE * f = fopen(filename, "w");
                 fprintf(f, "%% np n prime ellapsedTime isEven\\n matrix \\n save_prefix \n");
-                fprintf(f, "%d %ld %llu %f %d\n", MPIsize, n, prime, (float)(wtime() - start), isEvenSave);
+                fprintf(f, "%d %ld",MPIsize, n);
+                fprintf(f,LU,prime);
+                fprintf(f,"%f %d\n", (float)(wtime() - start), isEvenSave);
                 fprintf(f, "%s\n", matrix_filename);
                 fprintf(f, "%s\n", save_prefix);
                 fclose(f);
@@ -1204,7 +1214,7 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                 free(save_v);
                 free(save_p);
         }else{
-        //in order to have the same random values as the single processor
+                //in order to have the same random values as the single processor
                 for (long rowId = 0; rowId < nrows; rowId++){
                         for (int colId = 0; colId < n; colId ++){
                                 if (rowId/calcBlockSide(nrows, blockingSqrt) == (transpose ? MPIj : MPIi)){
@@ -1256,7 +1266,6 @@ u32 * unique_block_lanczos(struct unique_block_t const * M, int n, bool transpos
                                                 vtAv[i] = (a+b)%prime;
                                         }
                                 }//here first procs has vtAv
-                        //check_symmetry(vtAv);
                 }
                 else if ( MPIi == 1) // have to compute vAtAv
                 {                        
