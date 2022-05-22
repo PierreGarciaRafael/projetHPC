@@ -3,17 +3,11 @@ CFLAGS = -std=c99 -g -Wall -Wextra -Werror  -O3 -march=native -I. #
 LDFLAGS =
 LIBS = -lm
 
-objets = mmio.o lanczos_modp.o mmio.o checker_modp.o
-lanczos_modp : $(objets)
-	$(CC) $(CFLAGS) -o lanczos_modp $(objets) -lm
+objetsl = mmio.o lanczos_modp.o
+objetsc = mmio.o lanczos_modp.o
+all:
+checker_modp :    $(objetsc)
+                $(CC) $(CFLAGS) $(LDFLAGS) -o checker_modp $(objetsc) -lm
 
-# Uncomment these for OpenMP
-#CFLAGS += -fopenmp
-#LDFLAGS += -fopenmp
-
-all: lanczos_modp checker_modp
-lanczos_modp: mmio.o lanczos_modp.o
-lanczos_modp.o: lanczos_modp.c mmio.h
-checker_modp:   mmio.o checker_modp.o
-checker_modp.o: checker_modp.c mmio.h
-
+lanczos_modp :     $(objetsl)
+                $(CC) $(CFLAGS) $(LDFLAGS) -o lanczos_modp $(objetsl) -lm
