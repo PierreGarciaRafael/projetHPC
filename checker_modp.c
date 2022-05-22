@@ -178,7 +178,7 @@ int main(int argc, char **argv)
                 if (3 != fscanf(matrix_file, "%d %d %d\n", &i, &j, &v)){
                         printf("parse error entry ");
                         printf(LD, u);
-                        errx(1,"\n")
+                        errx(1,"\n");
 
                 }
                 i -= 1;  /* MatrixMarket is 1-based */
