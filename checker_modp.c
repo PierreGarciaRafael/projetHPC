@@ -8,6 +8,13 @@
 
 #include "mmio.h"
 
+#ifdef __APPLE__
+#define LD "%lld"
+#else
+#define LD "%ld"
+#endif
+
+
 typedef int64_t  i64;
 typedef uint64_t u64;
 typedef uint32_t u32;
@@ -168,8 +175,12 @@ int main(int argc, char **argv)
         for (i64 u = 0; u < nnz; u++) {
                 int i, j;
                 u32 v;
-                if (3 != fscanf(matrix_file, "%d %d %d\n", &i, &j, &v))
-                        errx(1, "parse error entry %lld\n", u);
+                if (3 != fscanf(matrix_file, "%d %d %d\n", &i, &j, &v)){
+                        printf("parse error entry ");
+                        printf(LD, u);
+                        errx(1,"\n")
+
+                }
                 i -= 1;  /* MatrixMarket is 1-based */
                 j -= 1;
                 u64 vv = v % prime;
